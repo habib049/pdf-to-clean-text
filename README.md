@@ -170,6 +170,9 @@ pymupdf4llm is there because it's the obvious lightweight alternative; on this f
   merges or splits paragraphs. `--find` ignores hyphens so searches still work; body text is otherwise left
   as docling produced it.
 - **No password entry, page ranges or JSON output.**
+- **docling picks Apple's GPU (MPS) automatically on macOS.** That works on a real Mac, but inside a virtual
+  machine, including GitHub's macOS runners, it produced wrong layout results and a crashing table stage. If
+  you see that, set `DOCLING_DEVICE=cpu`. The CI workflow does.
 - **The first run needs a network** to fetch docling's models. If docling's check-in with Hugging Face fails
   later (flaky network), the conversion is retried from the local cache.
 - **Nothing is redacted.** "Clean" doesn't mean safe to share. The result cache stores the extracted text in

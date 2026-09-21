@@ -27,6 +27,11 @@ jobs:
   test:
     name: pytest (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      # GitHub's runners have no GPU. docling's default "auto" picks Apple's MPS on macOS, which inside a
+      # virtual machine gave wrong layout results and a failing table stage; CPU is what these runners have.
+      DOCLING_DEVICE: cpu
     strategy:
       fail-fast: false
       matrix:
@@ -40,9 +45,11 @@ jobs:
           cache-dependency-path: |
             requirements-dev.txt
             skills/pdf-to-clean-text/requirements.txt
-      - name: Install CPU-only torch on Linux (the default wheel bundles CUDA, several GB)
+      # The default Linux wheels bundle CUDA (several GB). torch and torchvision must come from the same
+      # index: torchvision from PyPI paired with a CPU torch fails with "operator torchvision::nms does not exist".
+      - name: Install CPU-only torch and torchvision on Linux
         if: runner.os == 'Linux'
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -r requirements-dev.txt
       - name: Cache docling's models
         uses: actions/cache@v4
