@@ -1,0 +1,25 @@
+{
+  "name": "pdf-to-clean-text",
+  "description": "A single skill that reads PDFs as clean markdown for Claude, instead of sending every page as an image.",
+  "owner": {
+    "name": "Habib ur Rehman",
+    "url": "https://github.com/habib049"
+  },
+  "plugins": [
+    {
+      "name": "pdf-to-clean-text",
+      "source": "./",
+      "description": "Read PDFs as clean markdown instead of page images: 3 to 10 times fewer tokens, section search, and warnings for pages whose text can't be trusted.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "pdf",
+        "markdown",
+        "docling",
+        "ocr",
+        "tokens"
+      ]
+    }
+  ]
+}

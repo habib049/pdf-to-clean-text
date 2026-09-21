@@ -1,0 +1,4 @@
+-r skills/pdf-to-clean-text/requirements.txt
+pytest
+reportlab
+matplotlib

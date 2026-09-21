@@ -1,0 +1,42 @@
+[
+  {
+    "skills": ["pdf-to-clean-text"],
+    "query": "Which vendors are approved according to the scanned appendix in test.pdf?",
+    "files": ["tests/test.pdf"],
+    "expected_behavior": [
+      "Converts the PDF with scripts/pdf_to_clean_text.py instead of reading the PDF natively",
+      "Names all three vendors: Alpha Ltd, Beta Inc and Gamma GmbH",
+      "Cites page 6 as the source",
+      "Says the page is a scan whose text came from OCR and was not verified"
+    ]
+  },
+  {
+    "skills": ["pdf-to-clean-text"],
+    "query": "What was the West region's Q2 revenue in test.pdf?",
+    "files": ["tests/test.pdf"],
+    "expected_behavior": [
+      "Converts the PDF with scripts/pdf_to_clean_text.py instead of reading the PDF natively",
+      "Answers 6.9 (million dollars), read from Table 1",
+      "Cites page 2 as the source"
+    ]
+  },
+  {
+    "skills": ["pdf-to-clean-text"],
+    "query": "What does the chart in test.pdf show, and which quarter was highest?",
+    "files": ["tests/test.pdf"],
+    "expected_behavior": [
+      "Converts the PDF with scripts/pdf_to_clean_text.py instead of reading the PDF natively",
+      "Identifies the chart from its caption, 'Figure 1: Revenue by quarter, fiscal year', on page 3",
+      "Recognises the bar values are not in the extracted text, and views only page 3's image to read them rather than guessing",
+      "Answers that Q4 was highest"
+    ]
+  },
+  {
+    "skills": ["pdf-to-clean-text"],
+    "query": "Merge test.pdf and appendix.pdf into a single PDF.",
+    "files": ["tests/test.pdf"],
+    "expected_behavior": [
+      "Does not use the pdf-to-clean-text skill, since merging is a file operation and not reading content"
+    ]
+  }
+]
