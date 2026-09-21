@@ -363,3 +363,35 @@ def test_the_fallback_finds_the_real_fixtures_caption_and_agrees_with_docling_wh
     assert found == "Figure 1: Revenue by quarter, fiscal year"
     linked = chart.caption_text(doc)
     assert linked in ("", found)  # empty where docling didn't link it; the same text where it did
+
+
+# --------------------------------------------------------------------------- warm-up
+
+
+def test_the_warmup_pdf_is_a_valid_one_page_pdf(tmp_path):
+    (tmp_path / "w.pdf").write_bytes(m._warmup_pdf_bytes())
+    doc = m.pdfium.PdfDocument(tmp_path / "w.pdf")
+    assert len(doc) == 1 and "warm-up" in doc[0].get_textpage().get_text_range()
+
+
+def test_warmup_converts_a_real_pdf_and_reports_ready(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(m, "_convert", lambda path, ocr, page_range=None: seen.append((Path(path).read_bytes()[:5], ocr)))
+    assert m.main(["--warmup"]) == 0
+    assert seen == [(b"%PDF-", False)]  # the real conversion path, on a genuine PDF
+    assert "models are downloaded and ready" in capsys.readouterr().err
+
+
+def test_warmup_reports_a_network_failure_instead_of_a_traceback(monkeypatch, capsys):
+    def fail(*a, **k):
+        raise m.DependencyError("docling could not reach Hugging Face. Check your connection and try again.")
+
+    monkeypatch.setattr(m, "_convert", fail)
+    assert m.main(["--warmup"]) == 1
+    assert "error: docling could not reach Hugging Face" in capsys.readouterr().err
+
+
+def test_running_with_no_pdf_and_no_warmup_is_a_usage_error():
+    with pytest.raises(SystemExit) as e:
+        m.main([])
+    assert e.value.code == 2

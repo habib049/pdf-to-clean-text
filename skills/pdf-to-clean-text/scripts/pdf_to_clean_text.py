@@ -6,6 +6,8 @@ watermark strip, page markers, warnings about OCR'd pages, section search, and e
     python pdf_to_clean_text.py FILE.pdf > doc.md 2> doc.log
     python pdf_to_clean_text.py FILE.pdf --find "refund policy"
 
+    python pdf_to_clean_text.py --warmup     # download docling's models once, before the first real PDF
+
 Importable too: `from pdf_to_clean_text import extract`.
 Needs: pip install docling pypdfium2
 """
@@ -375,6 +377,49 @@ def find_sections(text: str, terms: list[str]) -> tuple[list[str], int]:
     return [f"<!-- match: starts on page {pg} -->\n{body}" for pg, body in hits[:MAX_MATCHES]], len(hits)
 
 
+# --------------------------------------------------------------------------- warm-up
+
+
+def _warmup_pdf_bytes() -> bytes:
+    """A one-page PDF built in memory. Converting it is what makes docling fetch its models."""
+    stream = b"BT /F1 12 Tf 20 50 Td (warm-up) Tj ET"
+    objs = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        b"<</Length %d>>\nstream\n%s\nendstream" % (len(stream), stream),
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i, obj)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % off for off in offsets)
+    return out + b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+
+
+def warmup() -> int:
+    """Download docling's models now (about 0.5 GB, once), so the first real conversion isn't the one that stalls.
+
+    docling-tools' own `models download` isn't used: it saves to ~/.cache/docling, while the conversion reads the
+    Hugging Face cache, so the models would be downloaded again. Converting a page goes through the real path.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "warmup.pdf"
+        path.write_bytes(_warmup_pdf_bytes())
+        try:
+            _convert(path, ocr=False)
+        except PdfError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+    print("info: docling's models are downloaded and ready", file=sys.stderr)
+    return 0
+
+
 # --------------------------------------------------------------------------- cli
 
 
@@ -394,7 +439,9 @@ def _quieten():
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog=f"python {Path(__file__).name}", description="Read a PDF as clean markdown.")
-    ap.add_argument("pdf")
+    ap.add_argument("pdf", nargs="?")
+    ap.add_argument("--warmup", action="store_true", help="download docling's models now (about 0.5 GB, once) so the "
+                    "first real conversion isn't the one that stalls, then exit")
     ap.add_argument("--find", action="append", metavar="TERM", help="print only the sections containing TERM "
                     "(repeat for several terms; any match counts)")
     ap.add_argument("--no-cache", action="store_true", help="don't read or write the result cache "
@@ -403,6 +450,10 @@ def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):  # a Windows console defaults to a codec that can't print most text
         sys.stdout.reconfigure(encoding="utf-8")
     _quieten()
+    if args.warmup:
+        return warmup()
+    if not args.pdf:
+        ap.error("a PDF is required (or use --warmup)")
     try:
         result = extract(args.pdf, use_cache=not args.no_cache)
     except PdfError as e:

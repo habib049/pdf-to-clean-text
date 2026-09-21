@@ -81,7 +81,7 @@ Relay the message as written; it is already plain English. Then:
 | No file / not a PDF | Check the path, and that the file really is a PDF. |
 | damaged or incomplete | Nothing can be read from it. Ask for a fresh copy. |
 | no extractable text | Probably blank or an unreadable scan. View the pages as images instead. |
-| could not reach Hugging Face | A network problem, not a bad PDF: the models aren't downloaded yet. Ask the user to connect and retry. |
+| could not reach Hugging Face | A network problem, not a bad PDF: the models aren't downloaded yet. Ask the user to connect, then run `--warmup` once and retry. |
 | `... isn't installed. Run: pip install ...` | See Setup. Ask before installing. |
 
 ## Limits
@@ -99,5 +99,13 @@ From this skill's folder:
 pip install -r requirements.txt
 ```
 
-This installs docling, which brings in torch (several GB), and the first run downloads about 0.5 GB of
-models. Tell the user the size and ask before installing on their behalf.
+This installs docling, which brings in torch (several GB). Then download the models once, so the first real
+PDF isn't the one that stalls; it needs a network, takes a few minutes, and fetches about 0.5 GB:
+
+```bash
+python scripts/pdf_to_clean_text.py --warmup
+```
+
+Tell the user the sizes and ask before installing or downloading on their behalf. On Linux, suggest
+installing CPU-only PyTorch first (`pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`),
+which is far smaller than the default build.

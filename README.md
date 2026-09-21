@@ -80,11 +80,19 @@ cp -r pdf-to-clean-text/skills/pdf-to-clean-text ~/.claude/skills/
 
 ```bash
 pip install -r ~/.claude/skills/pdf-to-clean-text/requirements.txt   # or the plugin's copy
+python ~/.claude/skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py --warmup
 ```
 
-docling pulls in torch: several GB of packages, plus about 0.5 GB of models downloaded on first use (needs a
-network once; after that it works offline). Python 3.10 or newer. Claude asks before installing them if they
-are missing.
+`--warmup` downloads docling's models (about 0.5 GB, a few minutes, needs a network once) so that your first real
+PDF isn't the one that stalls. After it, everything works offline. Python 3.10 or newer. Claude asks before
+installing anything if the dependencies are missing.
+
+**On Linux, install the CPU-only PyTorch first.** docling needs torch, and the default Linux build bundles
+NVIDIA's CUDA libraries and is far larger; the CPU wheel is 187 MB:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
 
 **Where it works:** Claude Code and other agents with a local shell. It does not work on the Claude API's code
 execution tool, which has no network access and can't install packages. I developed and tested it on macOS
@@ -199,7 +207,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Thirty-one tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
+Thirty-five tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
 so there are no checked-in binaries and nothing is mocked in the end-to-end checks. The fixture is synthetic:
 reproducible, not representative. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
 

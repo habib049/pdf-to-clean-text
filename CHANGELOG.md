@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `--warmup` downloads docling's models (about 0.5 GB) up front by converting a tiny built-in PDF, so the first
+  real document isn't the one that stalls. docling's own `docling-tools models download` isn't used: it saves to
+  `~/.cache/docling`, but conversions read the Hugging Face cache, so the models would be fetched twice.
+- README: install CPU-only PyTorch on Linux (a 187 MB wheel instead of the CUDA build).
+
 ### Fixed
 - A figure whose caption docling didn't link (it varies by platform: linked on macOS, not on Linux) got a false
   "no caption found" warning. The nearest "Figure N" line beside the picture is now used.
