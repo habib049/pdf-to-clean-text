@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A figure whose caption docling didn't link (it varies by platform: linked on macOS, not on Linux) got a false
+  "no caption found" warning. The nearest "Figure N" line beside the picture is now used.
+- A clean install had no `onnxruntime`, so docling's OCR fell back to a PyTorch backend that downloads its models
+  from modelscope.cn on the first scanned page (a 502 there failed a CI run). `requirements.txt` now asks for
+  `docling[rapidocr]`, the official extra, which brings CPU `onnxruntime` and uses the models bundled in the wheel.
+- CI on Linux failed with "operator torchvision::nms does not exist": `torch` and `torchvision` are now installed
+  together from the CPU index. CI on macOS runs docling on the CPU, because docling's automatic choice of Apple's
+  GPU (MPS) gave wrong results inside GitHub's virtual machines.
+
 ## [0.1.0] - 2026-09-21
 
 First release.

@@ -1,2 +1,2 @@
-docling>=2.129,<3
+docling[rapidocr]>=2.129,<3
 pypdfium2>=5,<6

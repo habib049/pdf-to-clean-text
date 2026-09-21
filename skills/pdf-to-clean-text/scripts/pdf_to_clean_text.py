@@ -34,12 +34,14 @@ MIN_FRACTION = 0.6  # a line must recur on this share of pages before it's strip
 MAX_LEN = 40  # boilerplate is short; long repeated text is content
 MAX_MATCHES = 10  # --find stops here: a term like "the" would otherwise return the whole document
 CHARS_PER_TOKEN = 3.0  # measured on a 30-page document: 75,982 chars was 25,052 tokens
-CACHE_VERSION = 3  # bump when the output changes, so stale cached results are ignored
+CACHE_VERSION = 4  # bump when the output changes, so stale cached results are ignored
 MAX_CACHE_ENTRIES = 200  # oldest-used results are deleted beyond this (a few MB to tens of MB)
 # The text is read by a model, not rendered, so markdown's escaping only changes what the document says:
 # "&" would become "&amp;" and "max_tokens" would become "max\_tokens", which a search for the real name misses.
 _EXPORT = dict(escape_html=False, escape_underscores=False)
 _PAGE_BREAK = "\x00pdf-to-clean-text-page-break\x00"  # sentinel; no real document contains a NUL
+_CAPTION = re.compile(r"(?i:figure|fig\.?|chart|graph|diagram)\s*\d")  # "Figure 3", "Fig. 2", "Chart 1"
+CAPTION_MAX_GAP = 40  # points between a picture and its caption line; real ones sit within ~10-20
 
 
 # --------------------------------------------------------------------------- errors
@@ -217,6 +219,28 @@ def _page_markdown(doc, first: int, last: int) -> dict[int, str]:
     return {n: doc.export_to_markdown(page_no=n, **_EXPORT) for n in range(first, last + 1)}
 
 
+def _nearby_caption(doc, pic) -> str:
+    """The closest "Figure N" line touching a picture, for when docling didn't link one.
+
+    docling links a caption to its figure when its layout model labels the caption, and that varies with the
+    platform: the same page linked it on macOS and not on Linux, leaving a false "no caption" warning with the
+    caption sitting right under the figure. So when there's no link, take the nearest matching line on the same
+    page that overlaps the picture horizontally and is within CAPTION_MAX_GAP points of it vertically.
+    """
+    pb = pic.prov[0]
+    p_lo, p_hi = sorted((pb.bbox.b, pb.bbox.t))
+    best = None
+    for t in doc.texts:
+        if not t.prov or t.prov[0].page_no != pb.page_no or not _CAPTION.match(t.text.strip()):
+            continue
+        tb = t.prov[0].bbox
+        t_lo, t_hi = sorted((tb.b, tb.t))
+        gap = max(0, max(p_lo, t_lo) - min(p_hi, t_hi))
+        if min(pb.bbox.r, tb.r) - max(pb.bbox.l, tb.l) > 0 and gap <= CAPTION_MAX_GAP and (best is None or gap < best[0]):
+            best = (gap, t.text.strip())
+    return best[1] if best else ""
+
+
 def _runs(pages: set[int]) -> list[tuple[int, int]]:
     """{1, 2, 3, 7} -> [(1, 3), (7, 7)]: consecutive scanned pages are OCR'd in one conversion."""
     runs = []
@@ -298,7 +322,7 @@ def extract(path, use_cache: bool = True) -> Result:
         page = pic.prov[0].page_no
         if page in scans:  # the "figure" on a scanned page is the page itself
             continue
-        caption = pic.caption_text(doc)
+        caption = pic.caption_text(doc) or _nearby_caption(doc, pic)
         figures.append(Figure(page, caption))
         if not caption:
             warnings.append(f"page {page}: figure with no caption found")

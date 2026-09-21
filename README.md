@@ -165,7 +165,9 @@ pymupdf4llm is there because it's the obvious lightweight alternative; on this f
   (`se d r  d  p   yar`). The warning says a page was OCR'd, not that it went wrong.
 - **The watermark grid is 20pt.** A stamp that drifts across a grid boundary between pages won't group, and
   survives. Only lines of 40 characters or fewer are candidates, so a long repeated notice stays in.
-- **Figures are captions only.** A chart with no caption produces a warning, not a description.
+- **Figures are captions only.** A chart with no caption produces a warning, not a description. docling links a
+  caption to its figure through its layout model, which behaved differently on Linux than on macOS for the same
+  page, so when there's no link the nearest "Figure N" line touching the picture is used instead.
 - **docling joins hyphenated words** split across lines (`large-\nscale` becomes `largescale`) and sometimes
   merges or splits paragraphs. `--find` ignores hyphens so searches still work; body text is otherwise left
   as docling produced it.
@@ -197,12 +199,12 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Twenty-seven tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
+Thirty-one tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
 so there are no checked-in binaries and nothing is mocked in the end-to-end checks. The fixture is synthetic:
 reproducible, not representative. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
 
 ## License
 
 MIT, see [LICENSE](LICENSE). The dependencies are permissive too: docling (MIT), pypdfium2 (BSD-3-Clause or
-Apache-2.0), RapidOCR (Apache-2.0), torch (BSD-style). The model weights docling downloads are Apache-2.0 and
+Apache-2.0), RapidOCR (Apache-2.0), onnxruntime (MIT), torch (BSD-style). The model weights docling downloads are Apache-2.0 and
 CDLA-Permissive-2.0 according to their Hugging Face model cards.

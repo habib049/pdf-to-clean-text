@@ -312,3 +312,51 @@ def test_quietening_covers_every_docling_module_without_touching_the_callers_log
     m._quieten()
     assert logging.getLogger("docling.datamodel.anything").getEffectiveLevel() == logging.CRITICAL
     assert logging.getLogger("unrelated").level == before
+
+
+# --------------------------------------------------------------------------- caption fallback
+
+
+class _Box:
+    def __init__(self, l, r, t, b):
+        self.l, self.r, self.t, self.b = l, r, t, b
+
+
+class _Item:
+    def __init__(self, text, page, box):
+        self.text, self.prov = text, [type("P", (), {"page_no": page, "bbox": box})()]
+
+
+class _CaptionDoc:
+    def __init__(self, *texts):
+        self.texts = list(texts)
+
+
+PICTURE = _Item("", 3, _Box(l=107, r=423, t=516, b=352))  # the geometry docling gave the fixture's chart
+
+
+def test_a_figure_caption_docling_did_not_link_is_found_next_to_the_picture():
+    below = _Item("Figure 1: Revenue by quarter", 3, _Box(l=100, r=281, t=339, b=330))  # 13 pt under it
+    assert m._nearby_caption(_CaptionDoc(below), PICTURE) == "Figure 1: Revenue by quarter"
+
+
+def test_a_nearby_caption_is_ignored_when_it_is_far_away_on_another_page_or_not_a_figure_line():
+    far = _Item("Figure 2: Elsewhere", 3, _Box(l=100, r=281, t=200, b=190))
+    other_page = _Item("Figure 3: Other page", 4, _Box(l=100, r=281, t=339, b=330))
+    table = _Item("Table 1: Regional revenue", 3, _Box(l=100, r=281, t=339, b=330))
+    prose = _Item("Figures show the trend was up", 3, _Box(l=100, r=281, t=339, b=330))
+    beside = _Item("Figure 4: To the side", 3, _Box(l=500, r=590, t=339, b=330))  # no horizontal overlap
+    assert m._nearby_caption(_CaptionDoc(far, other_page, table, prose, beside), PICTURE) == ""
+
+
+def test_the_closest_of_two_candidate_captions_wins():
+    near = _Item("Figure 1: Near", 3, _Box(l=100, r=281, t=339, b=330))
+    farther = _Item("Figure 2: Farther", 3, _Box(l=100, r=281, t=320, b=311))
+    assert m._nearby_caption(_CaptionDoc(farther, near), PICTURE) == "Figure 1: Near"
+
+
+def test_the_fallback_agrees_with_docling_on_the_real_fixture(pdf):
+    """Where docling did link the caption, the geometric fallback must find the same one."""
+    doc = m._convert(pdf, ocr=False)
+    chart = next(p for p in doc.pictures if p.prov[0].page_no == 3)
+    assert m._nearby_caption(doc, chart) == chart.caption_text(doc) == "Figure 1: Revenue by quarter, fiscal year"
