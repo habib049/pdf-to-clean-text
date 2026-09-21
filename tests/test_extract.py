@@ -355,8 +355,11 @@ def test_the_closest_of_two_candidate_captions_wins():
     assert m._nearby_caption(_CaptionDoc(farther, near), PICTURE) == "Figure 1: Near"
 
 
-def test_the_fallback_agrees_with_docling_on_the_real_fixture(pdf):
-    """Where docling did link the caption, the geometric fallback must find the same one."""
+def test_the_fallback_finds_the_real_fixtures_caption_and_agrees_with_docling_where_docling_linked_it(pdf):
+    """docling links the caption on macOS and not on Linux; the fallback must find it on both."""
     doc = m._convert(pdf, ocr=False)
     chart = next(p for p in doc.pictures if p.prov[0].page_no == 3)
-    assert m._nearby_caption(doc, chart) == chart.caption_text(doc) == "Figure 1: Revenue by quarter, fiscal year"
+    found = m._nearby_caption(doc, chart)
+    assert found == "Figure 1: Revenue by quarter, fiscal year"
+    linked = chart.caption_text(doc)
+    assert linked in ("", found)  # empty where docling didn't link it; the same text where it did
