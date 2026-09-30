@@ -6,6 +6,7 @@ watermark strip, page markers, warnings about OCR'd pages, section search, and e
     python pdf_to_clean_text.py FILE.pdf > doc.md 2> doc.log
     python pdf_to_clean_text.py FILE.pdf --find "refund policy"
     python pdf_to_clean_text.py FILE.pdf --outline           # headings with their pages
+    python pdf_to_clean_text.py FILE.pdf --map               # the card a reader agent wrote, else the outline
     python pdf_to_clean_text.py FILE.pdf --pages 12-14       # just those pages
 
     python pdf_to_clean_text.py --warmup     # download docling's models once, before the first real PDF
@@ -463,6 +464,52 @@ def select_pages(text: str, spec: str) -> str:
     return "\n".join(f"<!-- page {n} -->\n{pages[n]}".rstrip() for n in parse_pages(spec, len(pages)))
 
 
+NOTES_MIN_SHARE = 0.2  # notes shorter than this share of the text have summarized facts away, not compressed them
+_PAGE_TAG = re.compile(r"(?<![\w/])p(\d{1,4})(?:/(\d{1,4}))?(?![\d-])")  # p12 or p4/22; not a range like p3-6
+_LABEL = re.compile(r"^#+\s*([A-Z][A-Za-z]+\.?\s+\d+(?:\.\d+)*)\b", re.MULTILINE)  # "## Question 5.9 · ..."
+
+
+def _plain(s: str) -> str:
+    return re.sub(r"\s+", " ", s).lower()
+
+
+def check_notes(text: str, notes: str) -> list[str]:
+    """What's wrong with a reader agent's notes, as plain sentences; empty when they cover the whole document.
+
+    A page counts as covered when some note carries its tag (`p12`, or `p4/22` for a question and its answer).
+    A range like `p3-6` in a heading doesn't count: it can sit above notes that skipped half the range. Every
+    numbered heading label (`Question 5.9`, `Section 4.2`, `Table 3`) must appear too, since that's what a later
+    task looks things up by.
+    """
+    tagged = {int(n) for pair in _PAGE_TAG.findall(notes) for n in pair if n}
+    missing = [n for n, body in _split_pages(text).items() if len(body) >= 100 and n not in tagged]
+    problems = []
+    if missing:
+        spans = ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in _runs(set(missing)))
+        problems.append(f"pages {spans} have text but no notes tagged with their page")
+    in_notes = _plain(notes)
+    lost = list(dict.fromkeys(l for l in _LABEL.findall(text) if _plain(l) not in in_notes))
+    if lost:
+        more = f" and {len(lost) - 10} more" if len(lost) > 10 else ""
+        problems.append(f"these headings' labels are missing from the notes: {', '.join(lost[:10])}{more}")
+    share = len(notes) / max(len(text), 1)
+    if share < NOTES_MIN_SHARE:
+        problems.append(f"the notes are {share:.0%} of the text's length, under {NOTES_MIN_SHARE:.0%}: facts were "
+                        "summarized away rather than compressed")
+    return problems
+
+
+def compiled_paths(path) -> tuple[Path, Path]:
+    """Where this PDF's card (a short map of it) and notes (a condensed copy) live once a reader agent writes them.
+
+    Keyed by the file's content alone, so they survive script and docling upgrades: they cost a model's full read
+    of the document to rebuild, and depend on neither.
+    """
+    # ponytail: these aren't pruned with the cache's JSON entries; they're small, prune them too if that changes.
+    stem = _file_digest(Path(path))[:40]
+    return _cache_root() / f"{stem}.card.md", _cache_root() / f"{stem}.notes.md"
+
+
 # --------------------------------------------------------------------------- warm-up
 
 
@@ -539,7 +586,13 @@ def main(argv=None) -> int:
     view.add_argument("--find", action="append", metavar="TERM", help="print only the sections containing TERM "
                       "(repeat for several terms; any match counts)")
     view.add_argument("--outline", action="store_true", help="print only the headings, each with its page")
+    view.add_argument("--map", action="store_true", help="print the document's card if a reader agent has written "
+                      "one, otherwise the outline")
     view.add_argument("--pages", metavar="RANGE", help="print only these pages, e.g. 3, 3-5 or 1,4,7-9")
+    view.add_argument("--compiled-paths", action="store_true", help="print where this PDF's card and notes are "
+                      "kept (they may not exist yet), then exit")
+    view.add_argument("--check-notes", action="store_true", help="check that the notes cover every page with text "
+                      "and aren't cut to a summary; prints ok, or what's missing (exit 1)")
     ap.add_argument("--no-cache", action="store_true", help="don't read or write the result cache "
                     "(the cache holds the extracted text, so use this for sensitive documents)")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
@@ -550,6 +603,20 @@ def main(argv=None) -> int:
         return warmup()
     if not args.pdf:
         ap.error("a PDF is required (or use --warmup)")
+    if args.compiled_paths:
+        if args.no_cache:
+            ap.error("--compiled-paths is for notes kept on disk, so it can't be used with --no-cache")
+        try:
+            _preflight(Path(args.pdf))
+        except PdfError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        card, notes = compiled_paths(args.pdf)
+        card.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state = lambda p: "exists" if p.is_file() else "missing"
+        print(f"info: card {state(card)}, notes {state(notes)}", file=sys.stderr)
+        print(f"card {card}\nnotes {notes}")
+        return 0
     try:
         result = extract(args.pdf, use_cache=not args.no_cache)
     except PdfError as e:
@@ -558,7 +625,21 @@ def main(argv=None) -> int:
     try:
         tokens = round(len(result.text) / CHARS_PER_TOKEN, -2)
         print(f"info: {result.text.count('<!-- page ')} pages, about {tokens:,.0f} tokens as markdown", file=sys.stderr)
-        if args.outline:
+        if args.check_notes:
+            notes = None if args.no_cache else compiled_paths(args.pdf)[1]
+            if not notes or not notes.is_file():
+                print("error: there are no notes for this PDF yet (see --compiled-paths)", file=sys.stderr)
+                return 1
+            problems = check_notes(result.text, notes.read_text(encoding="utf-8"))
+            print("\n".join(problems) or "ok: the notes cover every page with text")
+            return 1 if problems else 0
+        card = compiled_paths(args.pdf)[0] if args.map and not args.no_cache else None
+        if card and card.is_file():
+            print("info: the document's card, written by a reader agent", file=sys.stderr)
+            print(card.read_text(encoding="utf-8").strip())
+        elif args.outline or args.map:
+            if args.map:
+                print("info: no card yet, so the outline instead", file=sys.stderr)
             print("\n".join(outline(result.text)))
         elif args.pages:
             try:

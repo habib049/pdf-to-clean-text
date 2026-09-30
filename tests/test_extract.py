@@ -281,6 +281,79 @@ def test_view_flags_are_mutually_exclusive(tmp_path):
     assert e.value.code == 2
 
 
+def test_compiled_paths_are_keyed_by_content_and_refuse_no_cache(pdf, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDF_TO_CLEAN_TEXT_CACHE", str(tmp_path / "c"))
+    copy = tmp_path / "renamed.pdf"
+    copy.write_bytes(pdf.read_bytes())
+    card, notes = m.compiled_paths(pdf)
+    assert (card, notes) == m.compiled_paths(copy)  # same content, same notes, whatever the file is called
+    assert card.name.endswith(".card.md") and notes.name.endswith(".notes.md")
+    assert m.main([str(pdf), "--compiled-paths"]) == 0
+    out = capsys.readouterr()
+    assert out.out == f"card {card}\nnotes {notes}\n"
+    assert "card missing, notes missing" in out.err
+    assert (tmp_path / "c").is_dir()
+    with pytest.raises(SystemExit):
+        m.main([str(pdf), "--compiled-paths", "--no-cache"])
+
+
+TEXT = "\n".join(f"<!-- page {n} -->\n" + f"page {n} fact. " * 20 for n in range(1, 6)) + "\n<!-- page 6 -->\n"
+
+
+def test_check_notes_passes_notes_that_cover_every_page_with_text():
+    notes = "\n".join(f"p{n} fact kept, fact kept, fact kept, fact kept, fact kept, fact kept." for n in range(1, 6))
+    assert m.check_notes(TEXT, notes) == []  # page 6 is blank, so it needs no notes
+
+
+def test_check_notes_names_the_pages_without_notes_and_ignores_heading_ranges():
+    notes = "## Part one (p1-5)\n" + "p1 and p4/2 facts, all kept in full, nothing summarized away at all here. " * 6
+    problems = m.check_notes(TEXT, notes)
+    assert problems == ["pages 3, 5 have text but no notes tagged with their page"]
+
+
+def test_check_notes_requires_every_numbered_heading_label():
+    text = TEXT.replace("<!-- page 2 -->\n", "<!-- page 2 -->\n## Question 1.4 · Domain 1\n## Section 12\n## Overview\n")
+    notes = "\n".join(f"p{n} fact kept, fact kept, fact kept, fact kept, fact kept, fact kept." for n in range(1, 6))
+    assert m.check_notes(text, notes) == [
+        "these headings' labels are missing from the notes: Question 1.4, Section 12"]  # "Overview" has no number
+    assert m.check_notes(text, notes + "\nquestion  1.4 and Section 12 kept") == []
+
+
+def test_check_notes_flags_notes_cut_down_to_a_summary():
+    problems = m.check_notes(TEXT, " ".join(f"p{n}" for n in range(1, 6)))
+    assert len(problems) == 1 and "summarized away" in problems[0]
+
+
+def test_cli_check_notes(pdf, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDF_TO_CLEAN_TEXT_CACHE", str(tmp_path / "c"))
+    monkeypatch.setattr(m, "extract", lambda path, use_cache=True: m.Result(TEXT))
+    assert m.main([str(pdf), "--check-notes"]) == 1
+    assert "no notes for this PDF yet" in capsys.readouterr().err
+    notes = m.compiled_paths(pdf)[1]
+    notes.parent.mkdir(parents=True)
+    notes.write_text("p1 " + "long fact " * 60)
+    assert m.main([str(pdf), "--check-notes"]) == 1
+    assert capsys.readouterr().out.startswith("pages 2-5 have text")
+    notes.write_text("\n".join(f"p{n} " + "long fact " * 20 for n in range(1, 6)))
+    assert m.main([str(pdf), "--check-notes"]) == 0
+    assert capsys.readouterr().out.startswith("ok")
+
+
+def test_map_shows_the_card_once_written_and_the_outline_before(pdf, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDF_TO_CLEAN_TEXT_CACHE", str(tmp_path / "c"))
+    monkeypatch.setattr(m, "extract", lambda path, use_cache=True: m.Result(PAGED))
+    assert m.main([str(pdf), "--map"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "p1 Intro\np2 Pricing\n" and "no card yet" in out.err
+    card = m.compiled_paths(pdf)[0]
+    card.parent.mkdir(parents=True)
+    card.write_text("A report. p1 intro, p2 pricing.\n")
+    assert m.main([str(pdf), "--map"]) == 0
+    assert capsys.readouterr().out == "A report. p1 intro, p2 pricing.\n"
+    assert m.main([str(pdf), "--map", "--no-cache"]) == 0  # no notes on disk for a sensitive document
+    assert capsys.readouterr().out == "p1 Intro\np2 Pricing\n"
+
+
 # --------------------------------------------------------------------------- pages, cache, cli
 
 
