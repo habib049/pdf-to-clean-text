@@ -1,8 +1,8 @@
 ---
 name: pdf-to-clean-text
-description: Extracts a PDF's content as clean markdown with page markers, so it can be summarized, analyzed, quoted or queried for 3 to 10 times fewer tokens than reading the PDF natively, which sends an image of every page. Use when the user shares a PDF (report, paper, contract, invoice, scan) and wants to know what is in it, especially when it is long or has tables, multiple columns, a watermark or scanned pages. Returns tables as markdown, links figure captions to figures, strips watermark lines repeated across pages, retrieves just the sections a question needs, and flags pages whose OCR text should not be trusted. Not for merging, splitting, rotating, watermarking or filling PDF forms, or exporting tables to CSV or Excel.
+description: Reads a PDF as clean text instead of page images, for a fraction of the tokens - search it, read chosen pages, or hand whole-document work (summaries, quizzes, translations) to a cheap reader agent. Use whenever the user shares a PDF and wants to know or do something with its content. Flags pages whose text can't be trusted. Not for editing, merging, splitting or filling PDFs.
 license: MIT
-compatibility: Needs Python 3.10+, shell access, and pip install -r requirements.txt (docling, pypdfium2); the first run downloads about 0.5 GB of models. Built for Claude Code. Won't work where packages can't be installed, such as the Claude API code execution tool.
+compatibility: Python 3.10+, shell access, and pip install -r requirements.txt. Built for Claude Code.
 metadata:
   author: habib049
   version: "0.1.0"
@@ -10,102 +10,39 @@ metadata:
 
 # PDF to clean text
 
-Reading a PDF natively sends every page as text plus an image. This reads the text locally instead, and
-the warnings replace the image as the safety net: they name the pages where text alone can't be trusted,
-so you look at those pages' images and no others.
+The script is `scripts/pdf_to_clean_text.py` in this skill's folder; call it by its absolute path. Every command
+converts the PDF if needed (about a second per page, then cached by file content) and prints `info:` (pages,
+size in tokens) and `warning:` lines on stderr. For errors, setup and limits, read [reference.md](reference.md).
 
-## Workflow
+**A few pages long:** read the whole conversion (`python SCRIPT FILE.pdf`) and skip the rest of this.
+
+**A question about part of it:** `python SCRIPT FILE.pdf --find "term"` prints the sections containing the term.
+It's literal, so use words the document uses (a heading, number, name). After two misses, or when the question
+shares no words with the text, run `--map` (a short card of the document, or its headings with their pages),
+then `--pages 12-14`.
+
+**Whole-document work** (summary, quiz, study guide, a table of everything, translation, proofreading): call the
+`pdf-reader` agent straight away. Don't convert, map or read the PDF first, and don't check its result yourself:
+keeping all of that out of this conversation is the point. Give it exactly this prompt; it has its own procedure:
 
 ```
-- [ ] 1. Convert, and read the info and warning lines
-- [ ] 2. Read the whole document, or only the sections the question needs
-- [ ] 3. Act on each warning
-- [ ] 4. Answer, citing pages
+CMD: python <absolute path of scripts/pdf_to_clean_text.py>
+PDF: <absolute path of the PDF>
+TASK: <the user's request, word for word>
+OUTPUT: <absolute path of the file to write>
 ```
 
-**1. Convert.** Paths are relative to this skill's folder. Name the output after the PDF so two documents
-never share a file:
+The agent builds notes from the PDF the first time and reuses them later (they're cached by file content, so
+"notes from an earlier run" means this same file), and it checks its own citations. Relay its report,
+including any warnings in it. Open OUTPUT only if the user asks you to change it. No `pdf-reader` agent? Read
+`--pages` in 10-page chunks yourself.
 
-```bash
-python scripts/pdf_to_clean_text.py report.pdf > /tmp/report.md 2> /tmp/report.log
-grep -E '^(info|warning|error):' /tmp/report.log
-```
+**Warnings,** for the pages you used:
 
-The `info:` line gives the page count and size in tokens. stdout holds only the document; stderr holds the
-diagnostics, and the `grep` drops stray library output. Exit code 0 is success, 1 a problem with the PDF,
-2 bad usage.
+- `scanned page, text came from OCR`: may be garbled. Say so when quoting it, and check names, amounts and dates
+  against that page's image.
+- `figure with no caption found`: its content isn't in the text. View that page's image if the answer needs it.
+- `removed lines repeated across pages`: watermark-like lines were dropped. Look here if something seems missing.
 
-The first conversion of a file takes about a second per page, and the very first run of all can take
-several minutes while docling downloads its models, so allow a long timeout. Results are cached by file
-content, so running the script again on the same PDF, including with `--find`, takes under a second. The
-cache stores the extracted text on disk; add `--no-cache` for a sensitive document.
-
-**2. Read what the task needs.** Decide by the size in the `info:` line.
-
-- **About 8,000 tokens or fewer** (roughly 10 dense pages): read the whole `.md` file. Searching would cost
-  more in extra steps than it saves.
-- **Longer:** fetch only the relevant sections.
-
-  ```bash
-  python scripts/pdf_to_clean_text.py report.pdf --find "question 3.9" --find "refund policy"
-  ```
-
-  This prints every section containing any of the terms (a section runs from one `##` heading to the next),
-  each labelled with the page it starts on, at most 10. Matching is case-insensitive and ignores hyphens,
-  but it is literal: pick words the document itself uses, such as a heading, identifier, name or number.
-  "reimbursement" will not find a section titled "Refunds". If nothing matches, try the document's likely
-  wording; if too much matches, use a more specific term; if the sections don't answer the question,
-  search again before reading more.
-
-Read the whole file only when the task covers the whole document (summarize it, review it end to end), and
-then in chunks.
-
-**3. Act on each warning.** The output can look clean while being wrong, so don't skip these.
-
-| Warning | What to do |
-|---|---|
-| `page N: scanned page, text came from OCR and was not verified` | The page's text may be garbled. When quoting it, say it came from OCR. Check names, amounts and dates against the page image, reading only that page of the original PDF. |
-| `page N: figure with no caption found` | The figure's content is not in the text. If the question depends on it, view that page's image rather than guessing. |
-| `removed lines repeated across pages: [...]` | Watermark-like lines were removed. If the user says something is missing, check here first. |
-
-**4. Answer.** Pages are separated by `<!-- page N -->` markers; cite the page a claim comes from. Figures
-appear as their caption followed by `<!-- image -->`, since the image itself is not extracted.
-
-## Errors
-
-Relay the message as written; it is already plain English. Then:
-
-| Error | Next step |
-|---|---|
-| password-protected | There is no password option. Ask for an unlocked copy. |
-| No file / not a PDF | Check the path, and that the file really is a PDF. |
-| damaged or incomplete | Nothing can be read from it. Ask for a fresh copy. |
-| no extractable text | Probably blank or an unreadable scan. View the pages as images instead. |
-| could not reach Hugging Face | A network problem, not a bad PDF: the models aren't downloaded yet. Ask the user to connect, then run `--warmup` once and retry. |
-| `... isn't installed. Run: pip install ...` | See Setup. Ask before installing. |
-
-## Limits
-
-- Figures are captions only; a chart with no caption is invisible in the text.
-- One bad page fails the whole conversion; there is no partial result.
-- Paragraph breaks from docling are not always faithful, so don't read meaning into a line break.
-- Nothing is redacted. Clean is not the same as safe to share.
-
-## Setup
-
-From this skill's folder:
-
-```bash
-pip install -r requirements.txt
-```
-
-This installs docling, which brings in torch (several GB). Then download the models once, so the first real
-PDF isn't the one that stalls; it needs a network, takes a few minutes, and fetches about 0.5 GB:
-
-```bash
-python scripts/pdf_to_clean_text.py --warmup
-```
-
-Tell the user the sizes and ask before installing or downloading on their behalf. On Linux, suggest
-installing CPU-only PyTorch first (`pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`),
-which is far smaller than the default build.
+**Cite pages** as the `<!-- page N -->` markers number them: the PDF's own numbering, which can differ from the
+numbers printed on the pages.

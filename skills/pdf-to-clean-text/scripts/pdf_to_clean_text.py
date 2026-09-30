@@ -5,6 +5,9 @@ watermark strip, page markers, warnings about OCR'd pages, section search, and e
 
     python pdf_to_clean_text.py FILE.pdf > doc.md 2> doc.log
     python pdf_to_clean_text.py FILE.pdf --find "refund policy"
+    python pdf_to_clean_text.py FILE.pdf --outline           # headings with their pages
+    python pdf_to_clean_text.py FILE.pdf --map               # the card a reader agent wrote, else the outline
+    python pdf_to_clean_text.py FILE.pdf --pages 12-14       # just those pages
 
     python pdf_to_clean_text.py --warmup     # download docling's models once, before the first real PDF
 
@@ -36,7 +39,6 @@ MIN_FRACTION = 0.6  # a line must recur on this share of pages before it's strip
 MAX_LEN = 40  # boilerplate is short; long repeated text is content
 MAX_MATCHES = 10  # --find stops here: a term like "the" would otherwise return the whole document
 CHARS_PER_TOKEN = 3.0  # measured on a 30-page document: 75,982 chars was 25,052 tokens
-CACHE_VERSION = 4  # bump when the output changes, so stale cached results are ignored
 MAX_CACHE_ENTRIES = 200  # oldest-used results are deleted beyond this (a few MB to tens of MB)
 # The text is read by a model, not rendered, so markdown's escaping only changes what the document says:
 # "&" would become "&amp;" and "max_tokens" would become "max\_tokens", which a search for the real name misses.
@@ -221,13 +223,34 @@ def _page_markdown(doc, first: int, last: int) -> dict[int, str]:
     return {n: doc.export_to_markdown(page_no=n, **_EXPORT) for n in range(first, last + 1)}
 
 
+def _tidy(md: str) -> str:
+    """Drop blank lines and collapse runs of spaces: they cost tokens and mean nothing to a model reading the text.
+
+    docling separates every paragraph with a blank line, and justified text comes through with doubled spaces.
+    Leading indentation is kept, and code blocks are left exactly as they are, since there spacing can be content.
+    """
+    out, fenced = [], False
+    for line in md.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced:
+            if not line.strip():
+                continue
+            line = re.sub(r"(?<=\S) {2,}", " ", line.rstrip())
+        out.append(line)
+    return "\n".join(out)
+
+
 def _nearby_caption(doc, pic) -> str:
     """The closest "Figure N" line touching a picture, for when docling didn't link one.
 
     docling links a caption to its figure when its layout model labels the caption, and that varies with the
     platform: the same page linked it on macOS and not on Linux, leaving a false "no caption" warning with the
     caption sitting right under the figure. So when there's no link, take the nearest matching line on the same
-    page that overlaps the picture horizontally and is within CAPTION_MAX_GAP points of it vertically.
+    page that either overlaps the picture horizontally and sits within CAPTION_MAX_GAP points above or below it
+    (the common case), or overlaps it vertically and sits within CAPTION_MAX_GAP points to either side (a
+    caption beside the figure, as in some two-column layouts). A line that overlaps on neither axis is diagonal
+    to the picture, not adjacent to it, and is never a match.
     """
     pb = pic.prov[0]
     p_lo, p_hi = sorted((pb.bbox.b, pb.bbox.t))
@@ -237,8 +260,15 @@ def _nearby_caption(doc, pic) -> str:
             continue
         tb = t.prov[0].bbox
         t_lo, t_hi = sorted((tb.b, tb.t))
-        gap = max(0, max(p_lo, t_lo) - min(p_hi, t_hi))
-        if min(pb.bbox.r, tb.r) - max(pb.bbox.l, tb.l) > 0 and gap <= CAPTION_MAX_GAP and (best is None or gap < best[0]):
+        h_overlap = min(pb.bbox.r, tb.r) - max(pb.bbox.l, tb.l)
+        v_overlap = min(p_hi, t_hi) - max(p_lo, t_lo)
+        if h_overlap > 0:
+            gap = max(0, max(p_lo, t_lo) - min(p_hi, t_hi))
+        elif v_overlap > 0:
+            gap = max(0, max(pb.bbox.l, tb.l) - min(pb.bbox.r, tb.r))
+        else:
+            continue
+        if gap <= CAPTION_MAX_GAP and (best is None or gap < best[0]):
             best = (gap, t.text.strip())
     return best[1] if best else ""
 
@@ -265,16 +295,32 @@ def _file_digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def _cache_file(digest: str) -> Path:
+def _script_digest() -> str:
+    """A stand-in for a hand-maintained CACHE_VERSION: this script's own source, hashed, so a change to any
+    constant or code path here invalidates old cache entries automatically instead of relying on someone
+    remembering to bump a number. A stale cache entry costs nothing but a re-conversion, so hashing the whole
+    file (docstrings included) is fine even though it invalidates more than strictly necessary.
+    """
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "unknown"
+
+
+def _cache_root() -> Path:
     # PDF_TO_CLEAN_TEXT_CACHE has its own name on purpose: XDG_CACHE_HOME also moves Hugging Face's
     # model cache, so overriding it would force a re-download of ~500 MB of docling models.
-    root = Path(os.environ.get("PDF_TO_CLEAN_TEXT_CACHE") or Path.home() / ".cache" / "pdf-to-clean-text")
+    return Path(os.environ.get("PDF_TO_CLEAN_TEXT_CACHE") or Path.home() / ".cache" / "pdf-to-clean-text")
+
+
+def _cache_file(digest: str) -> Path:
+    root = _cache_root()
     try:
         docling_version = metadata.version("docling")
     except metadata.PackageNotFoundError:
         docling_version = "unknown"
-    # The key covers everything the output depends on: the file, this script's format, docling itself.
-    return root / f"{digest[:40]}-v{CACHE_VERSION}-d{docling_version}.json"
+    # The key covers everything the output depends on: the file, this script's own logic, and docling itself.
+    return root / f"{digest[:40]}-v{_script_digest()}-d{docling_version}.json"
 
 
 def _cache_load(digest: str):
@@ -339,7 +385,7 @@ def extract(path, use_cache: bool = True) -> Result:
     if not "".join(pages.values()).strip():
         raise EmptyPDFError(f"{path.name} has no extractable text.")
     # Page markers make the page numbers in `warnings` locatable, and let a caller cite a page back.
-    text = "\n\n".join(f"<!-- page {n} -->\n\n{md.strip()}" for n, md in pages.items())
+    text = "\n".join(f"<!-- page {n} -->\n{_tidy(md).strip()}" for n, md in pages.items())
     result = Result(text.strip(), warnings, figures)
     if use_cache:
         _cache_save(digest, result)
@@ -377,6 +423,93 @@ def find_sections(text: str, terms: list[str]) -> tuple[list[str], int]:
     return [f"<!-- match: starts on page {pg} -->\n{body}" for pg, body in hits[:MAX_MATCHES]], len(hits)
 
 
+_MARKER = re.compile(r"^<!-- page (\d+) -->$", re.MULTILINE)
+
+
+def _split_pages(text: str) -> dict[int, str]:
+    parts = _MARKER.split(text)  # ["", "1", body, "2", body, ...]
+    return {int(n): body.strip() for n, body in zip(parts[1::2], parts[2::2])}
+
+
+def outline(text: str) -> list[str]:
+    """Every heading with the page it's on, as "p12 Pricing": the document's structure for a few percent of its
+    tokens, so a reader can pick the pages a task needs. docling's heading levels aren't reliable, so they're
+    left out. A document with no headings gets each page's first line instead.
+    """
+    pages = _split_pages(text)
+    heads = [f"p{n} {line.lstrip('#').strip()}" for n, body in pages.items()
+             for line in body.splitlines() if line.startswith("#")]
+    if heads:
+        return heads
+    return [f"p{n} {body.splitlines()[0][:80]}" for n, body in pages.items() if body]
+
+
+def parse_pages(spec: str, npages: int) -> list[int]:
+    """"3", "3-5" or "1,4,7-9" -> sorted page numbers. A bad spec raises ValueError with a message for a user."""
+    wanted = set()
+    for part in spec.split(","):
+        first, dash, last = part.strip().partition("-")
+        if not first.isdigit() or (dash and not last.isdigit()):
+            raise ValueError(f"can't read the page range {part.strip()!r}; use a form like 3, 3-5 or 1,4,7-9")
+        lo, hi = int(first), int(last or first)
+        if not 1 <= lo <= hi <= npages:
+            raise ValueError(f"pages {part.strip()} aren't in this document, which has pages 1-{npages}")
+        wanted.update(range(lo, hi + 1))
+    return sorted(wanted)
+
+
+def select_pages(text: str, spec: str) -> str:
+    """Only the requested pages, each still under its page marker so it can be cited."""
+    pages = _split_pages(text)
+    return "\n".join(f"<!-- page {n} -->\n{pages[n]}".rstrip() for n in parse_pages(spec, len(pages)))
+
+
+NOTES_MIN_SHARE = 0.2  # notes shorter than this share of the text have summarized facts away, not compressed them
+_PAGE_TAG = re.compile(r"(?<![\w/])p(\d{1,4})(?:/(\d{1,4}))?(?![\d-])")  # p12 or p4/22; not a range like p3-6
+_LABEL = re.compile(r"^#+\s*([A-Z][A-Za-z]+\.?\s+\d+(?:\.\d+)*)\b", re.MULTILINE)  # "## Question 5.9 · ..."
+
+
+def _plain(s: str) -> str:
+    return re.sub(r"\s+", " ", s).lower()
+
+
+def check_notes(text: str, notes: str) -> list[str]:
+    """What's wrong with a reader agent's notes, as plain sentences; empty when they cover the whole document.
+
+    A page counts as covered when some note carries its tag (`p12`, or `p4/22` for a question and its answer).
+    A range like `p3-6` in a heading doesn't count: it can sit above notes that skipped half the range. Every
+    numbered heading label (`Question 5.9`, `Section 4.2`, `Table 3`) must appear too, since that's what a later
+    task looks things up by.
+    """
+    tagged = {int(n) for pair in _PAGE_TAG.findall(notes) for n in pair if n}
+    missing = [n for n, body in _split_pages(text).items() if len(body) >= 100 and n not in tagged]
+    problems = []
+    if missing:
+        spans = ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in _runs(set(missing)))
+        problems.append(f"pages {spans} have text but no notes tagged with their page")
+    in_notes = _plain(notes)
+    lost = list(dict.fromkeys(l for l in _LABEL.findall(text) if _plain(l) not in in_notes))
+    if lost:
+        more = f" and {len(lost) - 10} more" if len(lost) > 10 else ""
+        problems.append(f"these headings' labels are missing from the notes: {', '.join(lost[:10])}{more}")
+    share = len(notes) / max(len(text), 1)
+    if share < NOTES_MIN_SHARE:
+        problems.append(f"the notes are {share:.0%} of the text's length, under {NOTES_MIN_SHARE:.0%}: facts were "
+                        "summarized away rather than compressed")
+    return problems
+
+
+def compiled_paths(path) -> tuple[Path, Path]:
+    """Where this PDF's card (a short map of it) and notes (a condensed copy) live once a reader agent writes them.
+
+    Keyed by the file's content alone, so they survive script and docling upgrades: they cost a model's full read
+    of the document to rebuild, and depend on neither.
+    """
+    # ponytail: these aren't pruned with the cache's JSON entries; they're small, prune them too if that changes.
+    stem = _file_digest(Path(path))[:40]
+    return _cache_root() / f"{stem}.card.md", _cache_root() / f"{stem}.notes.md"
+
+
 # --------------------------------------------------------------------------- warm-up
 
 
@@ -401,7 +534,13 @@ def _warmup_pdf_bytes() -> bytes:
 
 
 def warmup() -> int:
-    """Download docling's models now (about 0.5 GB, once), so the first real conversion isn't the one that stalls.
+    """Download docling's layout and table models now (about 0.5 GB, once), so the first real conversion isn't
+    the one that stalls.
+
+    The OCR path is exercised too, converting the same warm-up PDF a second time with OCR on. RapidOCR's own
+    checkpoints ship inside its pip package (`docling[rapidocr]`), not fetched at runtime, so this isn't
+    downloading anything extra - it just means a broken OCR setup (a bad install, a missing native dependency)
+    is caught here instead of surfacing on someone's first scanned PDF.
 
     docling-tools' own `models download` isn't used: it saves to ~/.cache/docling, while the conversion reads the
     Hugging Face cache, so the models would be downloaded again. Converting a page goes through the real path.
@@ -413,6 +552,7 @@ def warmup() -> int:
         path.write_bytes(_warmup_pdf_bytes())
         try:
             _convert(path, ocr=False)
+            _convert(path, ocr=True)
         except PdfError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
@@ -442,8 +582,17 @@ def main(argv=None) -> int:
     ap.add_argument("pdf", nargs="?")
     ap.add_argument("--warmup", action="store_true", help="download docling's models now (about 0.5 GB, once) so the "
                     "first real conversion isn't the one that stalls, then exit")
-    ap.add_argument("--find", action="append", metavar="TERM", help="print only the sections containing TERM "
-                    "(repeat for several terms; any match counts)")
+    view = ap.add_mutually_exclusive_group()
+    view.add_argument("--find", action="append", metavar="TERM", help="print only the sections containing TERM "
+                      "(repeat for several terms; any match counts)")
+    view.add_argument("--outline", action="store_true", help="print only the headings, each with its page")
+    view.add_argument("--map", action="store_true", help="print the document's card if a reader agent has written "
+                      "one, otherwise the outline")
+    view.add_argument("--pages", metavar="RANGE", help="print only these pages, e.g. 3, 3-5 or 1,4,7-9")
+    view.add_argument("--compiled-paths", action="store_true", help="print where this PDF's card and notes are "
+                      "kept (they may not exist yet), then exit")
+    view.add_argument("--check-notes", action="store_true", help="check that the notes cover every page with text "
+                      "and aren't cut to a summary; prints ok, or what's missing (exit 1)")
     ap.add_argument("--no-cache", action="store_true", help="don't read or write the result cache "
                     "(the cache holds the extracted text, so use this for sensitive documents)")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
@@ -454,6 +603,20 @@ def main(argv=None) -> int:
         return warmup()
     if not args.pdf:
         ap.error("a PDF is required (or use --warmup)")
+    if args.compiled_paths:
+        if args.no_cache:
+            ap.error("--compiled-paths is for notes kept on disk, so it can't be used with --no-cache")
+        try:
+            _preflight(Path(args.pdf))
+        except PdfError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        card, notes = compiled_paths(args.pdf)
+        card.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state = lambda p: "exists" if p.is_file() else "missing"
+        print(f"info: card {state(card)}, notes {state(notes)}", file=sys.stderr)
+        print(f"card {card}\nnotes {notes}")
+        return 0
     try:
         result = extract(args.pdf, use_cache=not args.no_cache)
     except PdfError as e:
@@ -462,7 +625,29 @@ def main(argv=None) -> int:
     try:
         tokens = round(len(result.text) / CHARS_PER_TOKEN, -2)
         print(f"info: {result.text.count('<!-- page ')} pages, about {tokens:,.0f} tokens as markdown", file=sys.stderr)
-        if args.find:
+        if args.check_notes:
+            notes = None if args.no_cache else compiled_paths(args.pdf)[1]
+            if not notes or not notes.is_file():
+                print("error: there are no notes for this PDF yet (see --compiled-paths)", file=sys.stderr)
+                return 1
+            problems = check_notes(result.text, notes.read_text(encoding="utf-8"))
+            print("\n".join(problems) or "ok: the notes cover every page with text")
+            return 1 if problems else 0
+        card = compiled_paths(args.pdf)[0] if args.map and not args.no_cache else None
+        if card and card.is_file():
+            print("info: the document's card, written by a reader agent", file=sys.stderr)
+            print(card.read_text(encoding="utf-8").strip())
+        elif args.outline or args.map:
+            if args.map:
+                print("info: no card yet, so the outline instead", file=sys.stderr)
+            print("\n".join(outline(result.text)))
+        elif args.pages:
+            try:
+                print(select_pages(result.text, args.pages))
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+        elif args.find:
             shown, total = find_sections(result.text, args.find)
             print("\n\n".join(shown))  # stdout is only what was asked for; diagnostics go to stderr
             if total > len(shown):

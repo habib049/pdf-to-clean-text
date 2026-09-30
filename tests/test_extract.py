@@ -229,6 +229,131 @@ def test_find_on_the_real_fixture_returns_the_ocrd_page_not_the_whole_document(r
     assert total == 1 and "Alpha Ltd" in shown[0] and len(shown[0]) < len(result.text) / 3
 
 
+# --------------------------------------------------------------------------- tidy, outline, pages, extract path
+
+
+def test_tidy_drops_blank_lines_and_doubled_spaces_but_keeps_indentation_and_code():
+    md = "Para  one  here.\n\n\n  - indented  item\n\n```\nx  =  1\n\ny = 2\n```\n| a   | b |"
+    assert m._tidy(md) == "Para one here.\n  - indented item\n```\nx  =  1\n\ny = 2\n```\n| a | b |"
+
+
+def test_the_real_fixture_has_no_blank_lines(result):
+    assert "\n\n" not in result.text
+
+
+PAGED = "<!-- page 1 -->\n## Intro\nhello\n<!-- page 2 -->\ntext\n## Pricing\nprices\n<!-- page 3 -->\nend"
+
+
+def test_outline_lists_each_heading_with_its_page():
+    assert m.outline(PAGED) == ["p1 Intro", "p2 Pricing"]
+
+
+def test_outline_falls_back_to_each_pages_first_line_without_headings():
+    assert m.outline("<!-- page 1 -->\nfirst line\nmore\n<!-- page 2 -->\n<!-- page 3 -->\nlast") == [
+        "p1 first line", "p3 last"]
+
+
+def test_parse_pages_reads_single_pages_ranges_and_lists():
+    assert m.parse_pages("3", 9) == [3]
+    assert m.parse_pages("7-9, 1,4 ,8", 9) == [1, 4, 7, 8, 9]
+    for bad in ("0", "10", "5-3", "a", "2-", "3-x"):
+        with pytest.raises(ValueError):
+            m.parse_pages(bad, 9)
+
+
+def test_select_pages_keeps_the_page_markers():
+    assert m.select_pages(PAGED, "2-3") == "<!-- page 2 -->\ntext\n## Pricing\nprices\n<!-- page 3 -->\nend"
+
+
+def test_cli_outline_and_pages(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(m, "extract", lambda path, use_cache=True: m.Result(PAGED))
+    assert m.main([str(tmp_path / "x.pdf"), "--outline"]) == 0
+    assert capsys.readouterr().out == "p1 Intro\np2 Pricing\n"
+    assert m.main([str(tmp_path / "x.pdf"), "--pages", "3"]) == 0
+    assert capsys.readouterr().out == "<!-- page 3 -->\nend\n"
+    assert m.main([str(tmp_path / "x.pdf"), "--pages", "4"]) == 2
+    assert "which has pages 1-3" in capsys.readouterr().err
+
+
+def test_view_flags_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        m.main([str(tmp_path / "x.pdf"), "--outline", "--pages", "1"])
+    assert e.value.code == 2
+
+
+def test_compiled_paths_are_keyed_by_content_and_refuse_no_cache(pdf, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDF_TO_CLEAN_TEXT_CACHE", str(tmp_path / "c"))
+    copy = tmp_path / "renamed.pdf"
+    copy.write_bytes(pdf.read_bytes())
+    card, notes = m.compiled_paths(pdf)
+    assert (card, notes) == m.compiled_paths(copy)  # same content, same notes, whatever the file is called
+    assert card.name.endswith(".card.md") and notes.name.endswith(".notes.md")
+    assert m.main([str(pdf), "--compiled-paths"]) == 0
+    out = capsys.readouterr()
+    assert out.out == f"card {card}\nnotes {notes}\n"
+    assert "card missing, notes missing" in out.err
+    assert (tmp_path / "c").is_dir()
+    with pytest.raises(SystemExit):
+        m.main([str(pdf), "--compiled-paths", "--no-cache"])
+
+
+TEXT = "\n".join(f"<!-- page {n} -->\n" + f"page {n} fact. " * 20 for n in range(1, 6)) + "\n<!-- page 6 -->\n"
+
+
+def test_check_notes_passes_notes_that_cover_every_page_with_text():
+    notes = "\n".join(f"p{n} fact kept, fact kept, fact kept, fact kept, fact kept, fact kept." for n in range(1, 6))
+    assert m.check_notes(TEXT, notes) == []  # page 6 is blank, so it needs no notes
+
+
+def test_check_notes_names_the_pages_without_notes_and_ignores_heading_ranges():
+    notes = "## Part one (p1-5)\n" + "p1 and p4/2 facts, all kept in full, nothing summarized away at all here. " * 6
+    problems = m.check_notes(TEXT, notes)
+    assert problems == ["pages 3, 5 have text but no notes tagged with their page"]
+
+
+def test_check_notes_requires_every_numbered_heading_label():
+    text = TEXT.replace("<!-- page 2 -->\n", "<!-- page 2 -->\n## Question 1.4 · Domain 1\n## Section 12\n## Overview\n")
+    notes = "\n".join(f"p{n} fact kept, fact kept, fact kept, fact kept, fact kept, fact kept." for n in range(1, 6))
+    assert m.check_notes(text, notes) == [
+        "these headings' labels are missing from the notes: Question 1.4, Section 12"]  # "Overview" has no number
+    assert m.check_notes(text, notes + "\nquestion  1.4 and Section 12 kept") == []
+
+
+def test_check_notes_flags_notes_cut_down_to_a_summary():
+    problems = m.check_notes(TEXT, " ".join(f"p{n}" for n in range(1, 6)))
+    assert len(problems) == 1 and "summarized away" in problems[0]
+
+
+def test_cli_check_notes(pdf, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDF_TO_CLEAN_TEXT_CACHE", str(tmp_path / "c"))
+    monkeypatch.setattr(m, "extract", lambda path, use_cache=True: m.Result(TEXT))
+    assert m.main([str(pdf), "--check-notes"]) == 1
+    assert "no notes for this PDF yet" in capsys.readouterr().err
+    notes = m.compiled_paths(pdf)[1]
+    notes.parent.mkdir(parents=True)
+    notes.write_text("p1 " + "long fact " * 60)
+    assert m.main([str(pdf), "--check-notes"]) == 1
+    assert capsys.readouterr().out.startswith("pages 2-5 have text")
+    notes.write_text("\n".join(f"p{n} " + "long fact " * 20 for n in range(1, 6)))
+    assert m.main([str(pdf), "--check-notes"]) == 0
+    assert capsys.readouterr().out.startswith("ok")
+
+
+def test_map_shows_the_card_once_written_and_the_outline_before(pdf, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDF_TO_CLEAN_TEXT_CACHE", str(tmp_path / "c"))
+    monkeypatch.setattr(m, "extract", lambda path, use_cache=True: m.Result(PAGED))
+    assert m.main([str(pdf), "--map"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "p1 Intro\np2 Pricing\n" and "no card yet" in out.err
+    card = m.compiled_paths(pdf)[0]
+    card.parent.mkdir(parents=True)
+    card.write_text("A report. p1 intro, p2 pricing.\n")
+    assert m.main([str(pdf), "--map"]) == 0
+    assert capsys.readouterr().out == "A report. p1 intro, p2 pricing.\n"
+    assert m.main([str(pdf), "--map", "--no-cache"]) == 0  # no notes on disk for a sensitive document
+    assert capsys.readouterr().out == "p1 Intro\np2 Pricing\n"
+
+
 # --------------------------------------------------------------------------- pages, cache, cli
 
 
@@ -283,6 +408,13 @@ def test_cache_prunes_the_least_recently_used_entries(tmp_path, monkeypatch):
 def test_cache_key_changes_with_the_docling_version(monkeypatch):
     before = m._cache_file("d" * 64)
     monkeypatch.setattr(m.metadata, "version", lambda name: "0.0.1")
+    assert m._cache_file("d" * 64) != before
+
+
+def test_cache_key_changes_when_the_script_itself_changes(monkeypatch):
+    """No hand-maintained CACHE_VERSION to forget bumping: the script's own source is part of the key."""
+    before = m._cache_file("d" * 64)
+    monkeypatch.setattr(m, "_script_digest", lambda: "different")
     assert m._cache_file("d" * 64) != before
 
 
@@ -355,6 +487,15 @@ def test_the_closest_of_two_candidate_captions_wins():
     assert m._nearby_caption(_CaptionDoc(farther, near), PICTURE) == "Figure 1: Near"
 
 
+def test_a_caption_beside_the_picture_is_found_too():
+    """Two-column layouts sometimes put the caption to the side rather than above or below."""
+    beside = _Item("Figure 1: Beside", 3, _Box(l=440, r=550, t=480, b=400))  # vertical overlap with PICTURE,
+    assert m._nearby_caption(_CaptionDoc(beside), PICTURE) == "Figure 1: Beside"  # 17pt gap to its right
+
+    too_far = _Item("Figure 2: Too far", 3, _Box(l=500, r=600, t=480, b=400))  # same row, gap > CAPTION_MAX_GAP
+    assert m._nearby_caption(_CaptionDoc(too_far), PICTURE) == ""
+
+
 def test_the_fallback_finds_the_real_fixtures_caption_and_agrees_with_docling_where_docling_linked_it(pdf):
     """docling links the caption on macOS and not on Linux; the fallback must find it on both."""
     doc = m._convert(pdf, ocr=False)
@@ -378,7 +519,7 @@ def test_warmup_converts_a_real_pdf_and_reports_ready(monkeypatch, capsys):
     seen = []
     monkeypatch.setattr(m, "_convert", lambda path, ocr, page_range=None: seen.append((Path(path).read_bytes()[:5], ocr)))
     assert m.main(["--warmup"]) == 0
-    assert seen == [(b"%PDF-", False)]  # the real conversion path, on a genuine PDF
+    assert seen == [(b"%PDF-", False), (b"%PDF-", True)]  # both the layout/table models and the OCR path
     assert "models are downloaded and ready" in capsys.readouterr().err
 
 

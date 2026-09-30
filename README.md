@@ -29,6 +29,10 @@ that is what's removed, but the remaining text is the document's actual content 
 losing it. Beating that means reading less, which is what `--find` is for. At Opus 5's $5 per million input
 tokens, the 30-page exam saves about $0.24 per full read and about $0.36 per `--find` lookup.
 
+When a question doesn't share words with the text, `--outline` and `--pages` do the same job by structure. On
+the 30-page exam (estimated from character counts, not `count_tokens`): the outline is about 1,800 tokens, 7%
+of the document, and the question pages alone (`--pages 3-21`, what a quiz on it needs) about 14,300, 57%.
+
 Four documents is a small sample, and I haven't watched Claude choose search terms in a live session; I picked
 terms myself from each question's wording, and 7 of 7 found the answer's section (an eighth question used a
 word the document never contains, and correctly found nothing). Measure your own documents before quoting a
@@ -49,8 +53,9 @@ document built to hit every case turned up what it doesn't do, which is what thi
    A line that doesn't repeat is never touched, so a one-off pull quote near a margin survives.
 2. **Scanned pages are flagged.** docling OCRs them silently and reports success even when the result is
    garbled. Every scanned page produces a warning.
-3. **Search by section.** `--find "term"` returns just the sections that contain it, each with the page it
-   starts on, in one command.
+3. **Reading less.** `--find "term"` returns just the sections that contain it, each with the page it starts
+   on. `--outline` lists the headings with their pages, and `--pages 12-14` returns just those pages. Blank lines
+   and doubled spaces are dropped, since a model gets nothing from them.
 4. **Page markers** (`<!-- page N -->`), so a warning about page 6 points somewhere and a quote can be cited.
 5. **Typed errors instead of tracebacks.** docling raises the same generic error for a missing file, a non-PDF
    and a password-protected one. Here they are separate, with a message you can show a user as-is, and a
@@ -69,12 +74,17 @@ One Python file of about 260 lines of code (about 420 with comments and docstrin
 /plugin install pdf-to-clean-text@pdf-to-clean-text
 ```
 
-**Or copy the skill folder** into `~/.claude/skills/` (every project) or `.claude/skills/` (one project):
+**Or copy the skill folder** into `~/.claude/skills/` (every project) or `.claude/skills/` (one project), and
+the reader agent into the matching `agents/` folder:
 
 ```bash
 git clone https://github.com/habib049/pdf-to-clean-text
 cp -r pdf-to-clean-text/skills/pdf-to-clean-text ~/.claude/skills/
+mkdir -p ~/.claude/agents && cp pdf-to-clean-text/agents/pdf-reader.md ~/.claude/agents/
 ```
+
+Without the agent the skill still works, but whole-document tasks are read in the main conversation instead of
+being handed off.
 
 **Then install its dependencies** (either way):
 
@@ -106,6 +116,19 @@ grep -E '^(info|warning|error):' report.log
 
 # only the sections that mention a term, instead of the whole document
 python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --find "refund policy" --find "3.9"
+
+# the headings with their pages, then only the pages you need
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --outline
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --pages 12-14
+
+# the short card the reader agent wrote for this PDF, or the outline if it hasn't yet
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --map
+
+# where the reader agent keeps this PDF's card and notes, keyed by the file's content
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --compiled-paths
+
+# whether those notes cover every page and heading, or were cut down to a summary
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --check-notes
 ```
 
 `--find` prints every section containing any of the terms (a section runs from one `##` heading to the next),
@@ -130,14 +153,28 @@ Imported, it leaves your logging alone and reuses one docling converter per proc
 
 ## How the skill behaves
 
-`SKILL.md` gives Claude a four-step workflow: convert and read the `info:`/`warning:` lines, read short
-documents whole but use `--find` on long ones, act on each warning, and answer citing pages. It falls back to a
-page's image only where a warning says the text can't be trusted.
+`SKILL.md` routes by what the task needs. A PDF of a few pages is read whole. A question about part of a longer
+one goes to `--find`, or `--map` then `--pages`. Whole-document work (a summary, a quiz, a table of everything, a
+translation) goes straight to the `pdf-reader` agent, which runs on Haiku, with a four-line prompt: the command,
+the PDF, the task and an output file. The agent picks its method: for a gist task it writes a short card and
+condensed notes the first time it sees a PDF (cached by the file's content) and works from those; for "every X"
+extraction it writes a script over the text instead of reading it; for translation or proofreading it works
+through the full text in chunks. It checks its own citations, writes the result to the file and reports back in
+under 100 words, so the main conversation never holds the document. Claude falls back to a page's image only where
+a warning says the text can't be trusted.
+
+`SKILL.md` stays short (about 650 tokens) because it's loaded every time the skill is used; errors, setup and
+limits are in `reference.md`, read only when one of them comes up.
+
+**Status of the agent:** exercised on one 30-page test document and fixed against two real failures found while
+doing that (incomplete notes; a note with the wrong answer to a question), but not yet run through the project's
+own eval suite or re-benchmarked end to end since those fixes. Treat it as a first cut.
 
 ```
 pdf-to-clean-text/
 ├── .claude-plugin/            marketplace.json, plugin.json (for /plugin install)
-├── skills/pdf-to-clean-text/  the skill: SKILL.md, requirements.txt, scripts/pdf_to_clean_text.py
+├── agents/pdf-reader.md       the reader agent (Haiku) for whole-document work
+├── skills/pdf-to-clean-text/  the skill: SKILL.md, reference.md, requirements.txt, scripts/pdf_to_clean_text.py
 ├── tests/                     pytest suite and the generator for its test PDF
 ├── evals/                     evaluation scenarios (not yet run; see evals/README.md)
 └── .github/                   CI and issue template
@@ -207,7 +244,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Thirty-five tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
+Fifty-two tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
 so there are no checked-in binaries and nothing is mocked in the end-to-end checks. The fixture is synthetic:
 reproducible, not representative. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
 
