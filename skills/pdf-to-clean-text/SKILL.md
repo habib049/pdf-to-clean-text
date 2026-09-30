@@ -1,6 +1,6 @@
 ---
 name: pdf-to-clean-text
-description: Extracts a PDF's content as clean markdown with page markers, so it can be summarized, analyzed, quoted or queried for 3 to 10 times fewer tokens than reading the PDF natively, which sends an image of every page. Use when the user shares a PDF (report, paper, contract, invoice, scan) and wants to know what is in it, especially when it is long or has tables, multiple columns, a watermark or scanned pages. Returns tables as markdown, links figure captions to figures, strips watermark lines repeated across pages, retrieves just the sections a question needs, and flags pages whose OCR text should not be trusted. Not for merging, splitting, rotating, watermarking or filling PDF forms, or exporting tables to CSV or Excel.
+description: Extracts a PDF's content as clean markdown with page markers, so it can be summarized, analyzed, quoted or queried for 3 to 10 times fewer tokens than reading the PDF natively, which sends an image of every page. Use when the user shares a PDF (report, paper, contract, invoice, scan) and wants to know what is in it, especially when it is long or has tables, multiple columns, a watermark or scanned pages. Returns tables as markdown, links figure captions to figures, strips watermark lines repeated across pages, retrieves just the sections or pages a question needs, and flags pages whose OCR text should not be trusted. Not for merging, splitting, rotating, watermarking or filling PDF forms, or exporting tables to CSV or Excel.
 license: MIT
 compatibility: Needs Python 3.10+, shell access, and pip install -r requirements.txt (docling, pypdfium2); the first run downloads about 0.5 GB of models. Built for Claude Code. Won't work where packages can't be installed, such as the Claude API code execution tool.
 metadata:
@@ -18,7 +18,7 @@ so you look at those pages' images and no others.
 
 ```
 - [ ] 1. Convert, and read the info and warning lines
-- [ ] 2. Read the whole document, or only the sections the question needs
+- [ ] 2. Read only what the task needs: whole, searched, or by page
 - [ ] 3. Act on each warning
 - [ ] 4. Answer, citing pages
 ```
@@ -40,11 +40,11 @@ several minutes while docling downloads its models, so allow a long timeout. Res
 content, so running the script again on the same PDF, including with `--find`, takes under a second. The
 cache stores the extracted text on disk; add `--no-cache` for a sensitive document.
 
-**2. Read what the task needs.** Decide by the size in the `info:` line.
+**2. Read only what the task needs.** Decide by the size in the `info:` line.
 
 - **About 8,000 tokens or fewer** (roughly 10 dense pages): read the whole `.md` file. Searching would cost
   more in extra steps than it saves.
-- **Longer:** fetch only the relevant sections.
+- **Longer, and the question is about part of it:** search first.
 
   ```bash
   python scripts/pdf_to_clean_text.py report.pdf --find "question 3.9" --find "refund policy"
@@ -55,7 +55,16 @@ cache stores the extracted text on disk; add `--no-cache` for a sensitive docume
   but it is literal: pick words the document itself uses, such as a heading, identifier, name or number.
   "reimbursement" will not find a section titled "Refunds". If nothing matches, try the document's likely
   wording; if too much matches, use a more specific term; if the sections don't answer the question,
-  search again before reading more.
+  navigate by structure instead:
+
+  ```bash
+  python scripts/pdf_to_clean_text.py report.pdf --outline
+  python scripts/pdf_to_clean_text.py report.pdf --pages 12-14
+  ```
+
+  `--outline` prints every heading with its page (`p12 Pricing`), a few percent of the document's tokens.
+  Choose the pages the question needs from it and fetch them with `--pages` (`3`, `3-5` or `1,4,7-9`). If
+  that still doesn't answer the question, read the whole document rather than guess.
 
 Read the whole file only when the task covers the whole document (summarize it, review it end to end), and
 then in chunks.
@@ -100,7 +109,7 @@ pip install -r requirements.txt
 ```
 
 This installs docling, which brings in torch (several GB). Then download the models once, so the first real
-PDF isn't the one that stalls; it needs a network, takes a few minutes, and fetches about 0.5 GB:
+PDF isn't the one that stalls; it needs a network, takes a few minutes and fetches about 0.5 GB:
 
 ```bash
 python scripts/pdf_to_clean_text.py --warmup

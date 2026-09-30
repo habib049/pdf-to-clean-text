@@ -29,6 +29,10 @@ that is what's removed, but the remaining text is the document's actual content 
 losing it. Beating that means reading less, which is what `--find` is for. At Opus 5's $5 per million input
 tokens, the 30-page exam saves about $0.24 per full read and about $0.36 per `--find` lookup.
 
+When a question doesn't share words with the text, `--outline` and `--pages` do the same job by structure. On
+the 30-page exam (estimated from character counts, not `count_tokens`): the outline is about 1,800 tokens, 7%
+of the document, and the question pages alone (`--pages 3-21`, what a quiz on it needs) about 14,300, 57%.
+
 Four documents is a small sample, and I haven't watched Claude choose search terms in a live session; I picked
 terms myself from each question's wording, and 7 of 7 found the answer's section (an eighth question used a
 word the document never contains, and correctly found nothing). Measure your own documents before quoting a
@@ -49,8 +53,9 @@ document built to hit every case turned up what it doesn't do, which is what thi
    A line that doesn't repeat is never touched, so a one-off pull quote near a margin survives.
 2. **Scanned pages are flagged.** docling OCRs them silently and reports success even when the result is
    garbled. Every scanned page produces a warning.
-3. **Search by section.** `--find "term"` returns just the sections that contain it, each with the page it
-   starts on, in one command.
+3. **Reading less.** `--find "term"` returns just the sections that contain it, each with the page it starts
+   on. `--outline` lists the headings with their pages, and `--pages 12-14` returns just those pages. Blank lines
+   and doubled spaces are dropped, since a model gets nothing from them.
 4. **Page markers** (`<!-- page N -->`), so a warning about page 6 points somewhere and a quote can be cited.
 5. **Typed errors instead of tracebacks.** docling raises the same generic error for a missing file, a non-PDF
    and a password-protected one. Here they are separate, with a message you can show a user as-is, and a
@@ -106,6 +111,11 @@ grep -E '^(info|warning|error):' report.log
 
 # only the sections that mention a term, instead of the whole document
 python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --find "refund policy" --find "3.9"
+
+# the headings with their pages, then only the pages you need
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --outline
+python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --pages 12-14
+
 ```
 
 `--find` prints every section containing any of the terms (a section runs from one `##` heading to the next),
@@ -130,9 +140,12 @@ Imported, it leaves your logging alone and reuses one docling converter per proc
 
 ## How the skill behaves
 
-`SKILL.md` gives Claude a four-step workflow: convert and read the `info:`/`warning:` lines, read short
-documents whole but use `--find` on long ones, act on each warning, and answer citing pages. It falls back to a
-page's image only where a warning says the text can't be trusted.
+`SKILL.md` gives Claude a four-step workflow: convert and read the `info:`/`warning:` lines, read only what the
+task needs, act on each warning, and answer citing pages. Short documents are read whole. For longer ones Claude
+routes by the task: a targeted question goes to `--find`, or `--outline` then `--pages`; a whole-document task
+like a summary or a quiz skips the pages it can't use and reads the rest once; a task that needs every word
+works through `--pages` in chunks. It falls back to a page's image only where a warning says the text can't be
+trusted.
 
 ```
 pdf-to-clean-text/
@@ -207,7 +220,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Thirty-five tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
+Forty-five tests, about 25 seconds after the first run. They generate the test PDF and run docling for real,
 so there are no checked-in binaries and nothing is mocked in the end-to-end checks. The fixture is synthetic:
 reproducible, not representative. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
 
