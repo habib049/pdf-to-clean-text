@@ -1,6 +1,6 @@
 {
   "name": "pdf-to-clean-text",
-  "description": "Read PDFs as clean markdown instead of page images: 3 to 10 times fewer tokens, section search, and warnings for pages whose text can't be trusted.",
+  "description": "Cut the token cost of reading PDFs in Claude Code by 65-99%: clean local text extraction instead of native page images, search and page navigation, and a reader agent for whole-document work.",
   "version": "0.1.0",
   "author": {
     "name": "Habib ur Rehman",
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/habib049/pdf-to-clean-text",
   "repository": "https://github.com/habib049/pdf-to-clean-text",
   "license": "MIT",
-  "keywords": ["pdf", "markdown", "docling", "ocr", "tokens", "context"]
+  "keywords": ["pdf", "markdown", "docling", "ocr", "tokens", "context", "token-optimization", "claude-code", "cost-reduction", "rag-alternative"]
 }

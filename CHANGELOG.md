@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `BENCHMARK.md`: methodology, full results and reproduction steps (a `count_tokens` curl recipe) for every
+  number this project quotes, split into measured vs. estimated, plus the docling/pymupdf4llm quality
+  comparison table moved here from the README.
+- `examples/`: three real, reproducible usage walkthroughs — a targeted `--find` question, navigating a
+  document by structure with `--outline`/`--pages`, and a whole-document task handed to the `pdf-reader` agent
+  (the last one is marked as a usage pattern, not a benchmarked result).
+- README: a "Why use this instead of Claude's native PDF reading?" section and an ASCII architecture diagram
+  of the three routing paths.
+- Plugin and marketplace metadata: descriptions and keywords repositioned around Claude Code token/cost
+  optimization, for discoverability.
 - A `pdf-reader` agent (Haiku) for whole-document work: summaries, quizzes, study guides, tables of everything,
   translations. `SKILL.md` hands it a fixed four-line prompt (command, PDF, task, output file) rather than
   reading the document itself, so the main conversation never holds the document's text. The first time it sees

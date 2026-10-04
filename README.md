@@ -2,68 +2,94 @@
 
 [![tests](https://github.com/habib049/pdf-to-clean-text/actions/workflows/tests.yml/badge.svg)](https://github.com/habib049/pdf-to-clean-text/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-5A3FFF.svg)](#install)
+[![GitHub stars](https://img.shields.io/github/stars/habib049/pdf-to-clean-text?style=social)](https://github.com/habib049/pdf-to-clean-text/stargazers)
 
-A Claude skill that reads a PDF as markdown instead of letting Claude read it natively: 3 to 10 times fewer
-tokens in my tests, and it tells you which parts not to trust.
+A Claude Code skill that cuts the token cost of reading PDFs by 65–99%, by extracting clean text locally
+instead of letting Claude read the PDF natively. Search it, fetch just the pages a question needs, or hand
+whole-document work to a cheaper model — all measured, all reproducible, numbers in [BENCHMARK.md](BENCHMARK.md).
 
-When Claude reads a PDF directly, every page is sent twice, as extracted text and as an image. The image is
-what keeps it from missing anything, and it's most of the cost. This skill extracts the text locally with
-[docling](https://github.com/docling-project/docling), lets Claude read only the sections a question needs,
-and flags the pages where text alone can't be trusted (scanned pages, uncaptioned figures) so Claude looks at
-those images and no others.
+## Why use this instead of Claude's native PDF reading?
+
+When you hand Claude a PDF directly — in Claude Code, the API, or claude.ai — it reads **every page twice**:
+once as extracted text, once as a rendered image. The image is what keeps it from missing a chart, a signature,
+or a scanned page with no text layer — but it's also about 62% of the token cost, on every page, whether or
+not that page has anything visual worth looking at.
+
+This skill flips that: it extracts clean text from the whole PDF locally first (with
+[docling](https://github.com/docling-project/docling), the same open-source library used for layout-aware
+extraction in production RAG pipelines), and only asks Claude to actually look at a page **image** when there's
+a specific reason to — a scanned page with no text layer, or a figure whose caption the text didn't capture.
+Everything else, Claude reads as text, at a fraction of the cost, with page citations intact.
+
+| | Native PDF reading | This skill |
+|---|---|---|
+| What Claude receives | Every page as text **and** image | Clean text, page-by-page |
+| Cost driver | Image tokens on every page (~62% of the total) | Only the pages a task needs |
+| Scanned pages | Silently included | Flagged, so you know to verify |
+| Uncaptioned figures | Silently included | Flagged — view that page's image, not the rest |
+| Searching the document | Not possible — it's already fully loaded | `--find`, `--outline` + `--pages` |
+| Repeat reads of the same file | Full cost again | Cached, near-instant |
+
+## How it works
+
+```
+                    PDF
+                     │
+                     ▼
+     ┌───────────────────────────────┐
+     │   docling: layout, OCR,       │   local, one-time per file,
+     │   tables, reading order       │   cached by file content
+     └───────────────┬───────────────┘
+                     ▼
+     ┌───────────────────────────────┐
+     │  this skill's layer:          │
+     │  strip watermarks, page       │
+     │  markers, flag untrustworthy  │
+     │  pages, typed errors          │
+     └───────────────┬───────────────┘
+                     ▼
+              clean markdown
+                     │
+       ┌─────────────┼──────────────────┐
+       ▼             ▼                  ▼
+   Targeted      Whole doc,          Whole doc,
+   question      the gist            every word
+   --find /      --outline, read     --pages in
+   --outline →   once, or hand       chunks
+   --pages       to a cheaper
+                 reader agent
+       │             │                  │
+       └─────────────┼──────────────────┘
+                     ▼
+         flagged pages → view that
+         page's image, nothing else
+                     ▼
+                    LLM
+```
+
+Claude decides which of the three routes a task needs — see [How the skill behaves](#how-the-skill-behaves)
+below. All three skip the one thing that makes native PDF reading expensive: sending every page as an image by
+default.
 
 ## Numbers
 
-Measured with the free `count_tokens` endpoint on `claude-opus-5` (Sonnet 5 gave identical counts on the 30-page exam).
+Full detail, methodology and reproduction steps in [BENCHMARK.md](BENCHMARK.md). Headline results, measured
+with the `count_tokens` API on a 30-page, 72,663-token (native) practice-exam PDF:
 
-| Document | Native (text + images) | This skill | Saved |
-|---|---|---|---|
-| 30-page exam (dense text, one scanned page) | 72,663 | 25,052 | 65.5% (2.9x) |
-| &nbsp;&nbsp;same, one question via `--find` | 72,663 | 423 | 99.4% (172x) |
-| 6-page report (one scanned page, two images) | 10,109 | 1,053 | 89.6% (9.6x) |
-| 2-page résumé | 4,569 | 1,494 | 67.3% (3.1x) |
-| 2-page résumé | 4,365 | 1,250 | 71.4% (3.5x) |
+| | Tokens | vs. native |
+|---|---|---|
+| Native PDF reading | 72,663 | — |
+| Full clean extraction | 25,052 | 65.5% less (2.9x) |
+| One question, `--find` | 423 | 99.4% less (172x) |
 
-Reading a whole document tops out around 65% on dense text: the page images are 62% of the native cost and
-that is what's removed, but the remaining text is the document's actual content and can't shrink without
-losing it. Beating that means reading less, which is what `--find` is for. At Opus 5's $5 per million input
-tokens, the 30-page exam saves about $0.24 per full read and about $0.36 per `--find` lookup.
+Reading a whole document tops out around 65% savings (the image tokens removed, text kept). Beating that means
+reading less — searching or navigating instead of loading everything — which is where `--find`, `--outline`
+and `--pages` come in. See [`examples/`](examples/) for real, reproducible walkthroughs of each.
 
-When a question doesn't share words with the text, `--outline` and `--pages` do the same job by structure. On
-the 30-page exam (estimated from character counts, not `count_tokens`): the outline is about 1,800 tokens, 7%
-of the document, and the question pages alone (`--pages 3-21`, what a quiz on it needs) about 14,300, 57%.
-
-Four documents is a small sample, and I haven't watched Claude choose search terms in a live session; I picked
-terms myself from each question's wording, and 7 of 7 found the answer's section (an eighth question used a
-word the document never contains, and correctly found nothing). Measure your own documents before quoting a
-number.
-
-**Speed.** The 30-page exam takes about 30 seconds the first time and 0.3 seconds when read again (results are
-cached by file content). OCR is about 95% of docling's run time, so it only runs on pages with no text layer:
-one page of 30 here, which took the first read from 289 seconds to about 30. The very first run also downloads
-docling's models, around 0.5 GB.
-
-## What it adds on top of docling
-
-docling does the hard part: layout, reading order, tables, OCR, dropping headers and footers. Testing it on a
-document built to hit every case turned up what it doesn't do, which is what this adds:
-
-1. **Watermarks are stripped.** A diagonal `DRAFT` stamp comes through as a body line on every page. Short
-   lines that recur at the same position on 60% or more of the pages (in documents of 4+ pages) are removed.
-   A line that doesn't repeat is never touched, so a one-off pull quote near a margin survives.
-2. **Scanned pages are flagged.** docling OCRs them silently and reports success even when the result is
-   garbled. Every scanned page produces a warning.
-3. **Reading less.** `--find "term"` returns just the sections that contain it, each with the page it starts
-   on. `--outline` lists the headings with their pages, and `--pages 12-14` returns just those pages. Blank lines
-   and doubled spaces are dropped, since a model gets nothing from them.
-4. **Page markers** (`<!-- page N -->`), so a warning about page 6 points somewhere and a quote can be cited.
-5. **Typed errors instead of tracebacks.** docling raises the same generic error for a missing file, a non-PDF
-   and a password-protected one. Here they are separate, with a message you can show a user as-is, and a
-   network failure is reported as a network failure rather than as a bad PDF.
-6. **Text left as written.** docling's markdown export rewrites `&` as `&amp;` and `max_tokens` as
-   `max\_tokens`, which breaks searching for real identifiers; that is switched off.
-
-One Python file of about 260 lines of code (about 420 with comments and docstrings), tests aside.
+**Speed.** The 30-page exam takes about 30 seconds the first time, 0.3 seconds on a repeat read (cached by
+file content). The very first run of all also downloads docling's models, about 0.5 GB, once.
 
 ## Install
 
@@ -95,7 +121,8 @@ python ~/.claude/skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py --warmup
 
 `--warmup` downloads docling's models (about 0.5 GB, a few minutes, needs a network once) so that your first real
 PDF isn't the one that stalls. After it, everything works offline. Python 3.10 or newer. Claude asks before
-installing anything if the dependencies are missing.
+installing anything on your behalf — see [SKILL.md](skills/pdf-to-clean-text/SKILL.md) and
+[reference.md](skills/pdf-to-clean-text/reference.md).
 
 **On Linux, install the CPU-only PyTorch first.** docling needs torch, and the default Linux build bundles
 NVIDIA's CUDA libraries and is far larger; the CPU wheel is 187 MB:
@@ -105,7 +132,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
 
 **Where it works:** Claude Code and other agents with a local shell. It does not work on the Claude API's code
-execution tool, which has no network access and can't install packages. I developed and tested it on macOS
+execution tool, which has no network access and can't install packages. Developed and tested on macOS
 (Apple silicon) with Python 3.12; CI also runs the tests on Linux.
 
 ## Use
@@ -130,6 +157,9 @@ python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --compil
 # whether those notes cover every page and heading, or were cut down to a summary
 python skills/pdf-to-clean-text/scripts/pdf_to_clean_text.py report.pdf --check-notes
 ```
+
+See [`examples/`](examples/) for three complete, real-output walkthroughs: a targeted question, navigating a
+document by structure, and a whole-document task handed to the reader agent.
 
 `--find` prints every section containing any of the terms (a section runs from one `##` heading to the next),
 each labelled with the page it starts on, capped at 10. It's a plain case-insensitive match that ignores
@@ -168,15 +198,18 @@ limits are in `reference.md`, read only when one of them comes up.
 
 **Status of the agent:** exercised on one 30-page test document and fixed against two real failures found while
 doing that (incomplete notes; a note with the wrong answer to a question), but not yet run through the project's
-own eval suite or re-benchmarked end to end since those fixes. Treat it as a first cut.
+own eval suite or re-benchmarked end to end since those fixes. Treat it as a first cut — see
+[`examples/whole-document-task.md`](examples/whole-document-task.md).
 
 ```
 pdf-to-clean-text/
 ├── .claude-plugin/            marketplace.json, plugin.json (for /plugin install)
 ├── agents/pdf-reader.md       the reader agent (Haiku) for whole-document work
 ├── skills/pdf-to-clean-text/  the skill: SKILL.md, reference.md, requirements.txt, scripts/pdf_to_clean_text.py
+├── examples/                  real, reproducible usage walkthroughs
 ├── tests/                     pytest suite and the generator for its test PDF
 ├── evals/                     evaluation scenarios (not yet run; see evals/README.md)
+├── BENCHMARK.md               how the numbers above were measured, and how to reproduce them
 └── .github/                   CI and issue template
 ```
 
@@ -184,23 +217,33 @@ The skill follows the [Agent Skills specification](https://agentskills.io/specif
 [authoring best practices](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices),
 and passes `skills-ref validate` and `claude plugin validate`.
 
-## What the layer changes, on a test file
+## What it adds on top of docling
 
-Measured on the file `tests/make_test_pdf.py` builds: 6 pages with a repeated header and footer, a diagonal
-DRAFT watermark, an unruled table, a captioned figure, a one-off quote in the top margin and one image-only
-page. It's a stress test, not a typical document.
+docling does the hard part: layout, reading order, tables, OCR, dropping headers and footers. Testing it on a
+document built to hit every case turned up what it doesn't do, which is what this adds:
 
-| | docling alone | with this layer | pymupdf4llm alone |
-|---|---|---|---|
-| Header / footer / page numbers | removed | removed | left in on every page |
-| DRAFT watermark | left in, 5 pages | removed | left in, letters leak into table cells |
-| One-off margin quote | kept | kept | kept |
-| Table | clean markdown | clean markdown | mangled |
-| Figure caption | linked to figure | linked (`r.figures`) | glued onto a paragraph |
-| Page boundaries | none | `<!-- page N -->` | none |
-| Scanned page | OCR'd, no warning | OCR'd, warning | silently dropped |
+1. **Watermarks are stripped.** A diagonal `DRAFT` stamp comes through as a body line on every page. Short
+   lines that recur at the same position on 60% or more of the pages (in documents of 4+ pages) are removed.
+   A line that doesn't repeat is never touched, so a one-off pull quote near a margin survives.
+2. **Scanned pages are flagged.** docling OCRs them silently and reports success even when the result is
+   garbled. Every scanned page produces a warning.
+3. **Reading less.** `--find "term"` returns just the sections that contain it, each with the page it starts
+   on. `--outline` lists the headings with their pages, and `--pages 12-14` returns just those pages. Blank lines
+   and doubled spaces are dropped, since a model gets nothing from them.
+4. **Page markers** (`<!-- page N -->`), so a warning about page 6 points somewhere and a quote can be cited.
+5. **Typed errors instead of tracebacks.** docling raises the same generic error for a missing file, a non-PDF
+   and a password-protected one. Here they are separate, with a message you can show a user as-is, and a
+   network failure is reported as a network failure rather than as a bad PDF.
+6. **Text left as written.** docling's markdown export rewrites `&` as `&amp;` and `max_tokens` as
+   `max\_tokens`, which breaks searching for real identifiers; that is switched off.
 
-pymupdf4llm is there because it's the obvious lightweight alternative; on this file it isn't a substitute.
+Compared to the obvious lightweight alternative, [pymupdf4llm](https://github.com/pymupdf/RAG) (no model
+download, but geometry-only heuristics): on a test file with a watermark, a table and a scanned page,
+pymupdf4llm left the watermark leaking into table cells, mangled the table, and silently dropped the scanned
+page's content. Full comparison table in
+[BENCHMARK.md](BENCHMARK.md#quality-not-just-tokens-vs-docling-alone-and-vs-pymupdf4llm).
+
+One Python file of about 260 lines of code (about 420 with comments and docstrings), tests aside.
 
 ## Known limits
 
@@ -216,26 +259,28 @@ pymupdf4llm is there because it's the obvious lightweight alternative; on this f
 - **docling joins hyphenated words** split across lines (`large-\nscale` becomes `largescale`) and sometimes
   merges or splits paragraphs. `--find` ignores hyphens so searches still work; body text is otherwise left
   as docling produced it.
-- **No password entry, page ranges or JSON output.**
+- **No password entry or JSON output.**
 - **docling picks Apple's GPU (MPS) automatically on macOS.** That works on a real Mac, but inside a virtual
   machine, including GitHub's macOS runners, it produced wrong layout results and a crashing table stage. If
   you see that, set `DOCLING_DEVICE=cpu`. The CI workflow does.
 - **The first run needs a network** to fetch docling's models. If docling's check-in with Hugging Face fails
   later (flaky network), the conversion is retried from the local cache.
-- **Nothing is redacted.** "Clean" doesn't mean safe to share. The result cache stores the extracted text in
-  plain form under `~/.cache/pdf-to-clean-text/` (owner-only permissions, at most 200 entries); use
-  `--no-cache` for sensitive documents.
+- **Nothing is redacted.** "Clean" doesn't mean safe to share. The result cache stores extracted text in plain
+  form under `~/.cache/pdf-to-clean-text/` (owner-only permissions, at most 200 entries); use `--no-cache` for
+  sensitive documents.
 - **Everything runs locally**; this code never uploads a PDF. The OCR engine's library, onnxruntime, ships its
-  own telemetry client, which I saw active in a crash report. I haven't tested whether `ORT_DISABLE_TELEMETRY=1`
-  (a variable name found in the library) turns it off, so if that matters to you, check it yourself.
+  own telemetry client, which was seen active in a crash report. `ORT_DISABLE_TELEMETRY=1` (a variable name
+  found in the library) is untested for turning it off — check it yourself if that matters to you.
+- **The reader agent is a first cut** — see [Status of the agent](#how-the-skill-behaves) above.
 
 ### A crash that's worked around
 
 On macOS, onnxruntime can abort the process at exit after the work is done: exit code 134 and a "Python quit
-unexpectedly" dialog. It was intermittent: I saw it in roughly 1 of every 5 to 8 runs that used OCR. It's a race between its telemetry shutdown and one of its
-own threads, not something in this code. The command line and the test suite now exit directly once their output
-is flushed, which skips that shutdown (registered exit handlers still run). If you import `extract()` into your
-own long-running process you can still hit it when that process exits; ending it with `os._exit` avoids it.
+unexpectedly" dialog. Intermittent — roughly 1 of every 5 to 8 runs that used OCR. It's a race between its
+telemetry shutdown and one of its own threads, not something in this code. The command line and the test suite
+now exit directly once their output is flushed, which skips that shutdown (registered exit handlers still run).
+Importing `extract()` into your own long-running process can still hit it when that process exits; ending it
+with `os._exit` avoids it.
 
 ## Tests
 
